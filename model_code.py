@@ -314,13 +314,13 @@ IMG_SIZE = 224
 BATCH_SIZE = 32
 EPOCHS = 15
 LEARNING_RATE = 0.001
-NUM_CLASSES = 10  # change based on your dataset classes count
+NUM_CLASSES = 10 
 
 # Data transforms (normalize and resize)
 transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet mean/std, can adjust
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],  
                          std=[0.229, 0.224, 0.225]),
 ])
 
@@ -455,6 +455,167 @@ plt.ylabel('Loss')
 plt.legend()
 
 plt.show()
+
+#4.	Performance Improvement 
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets, transforms
+import matplotlib.pyplot as plt
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+IMG_SIZE = 224
+BATCH_SIZE = 32
+EPOCHS = 15
+LEARNING_RATE = 0.001
+NUM_CLASSES = 10  
+
+# Data transforms with more augmentations
+train_transform = transforms.Compose([
+    transforms.RandomResizedCrop(IMG_SIZE, scale=(0.8, 1.0)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomVerticalFlip(),  # optional; remove if not suitable
+    transforms.RandomRotation(15),
+    transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1, hue=0.05),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
+val_transform = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
+dataset_path = '/content/cleaned_dataset/EuroSAT_RGB'
+full_dataset = datasets.ImageFolder(root=dataset_path)
+
+train_size = int(0.8 * len(full_dataset))
+val_size = len(full_dataset) - train_size
+train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+
+train_dataset.dataset.transform = train_transform
+val_dataset.dataset.transform = val_transform
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
+
+class CustomCNN(nn.Module):
+    def __init__(self, num_classes=NUM_CLASSES):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(inplace=True), nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(inplace=True), nn.MaxPool2d(2),
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(inplace=True), nn.MaxPool2d(2),
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d(1)  # output size = (batch, 256, 1, 1)
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Flatten(),
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = self.classifier(x)
+        return x
+
+model = CustomCNN(num_classes=NUM_CLASSES).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+
+best_val_loss = float('inf')
+early_stop_counter = 0
+early_stop_patience = 5
+
+train_acc_history, val_acc_history = [], []
+train_loss_history, val_loss_history = [], []
+
+for epoch in range(EPOCHS):
+    model.train()
+    train_correct, train_total, train_loss = 0, 0, 0
+
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        train_loss += loss.item() * images.size(0)
+        _, preds = torch.max(outputs, 1)
+        train_correct += (preds == labels).sum().item()
+        train_total += labels.size(0)
+
+    train_acc = train_correct / train_total
+    train_loss /= train_total
+
+    model.eval()
+    val_correct, val_total, val_loss = 0, 0, 0
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            val_loss += loss.item() * images.size(0)
+            _, preds = torch.max(outputs, 1)
+            val_correct += (preds == labels).sum().item()
+            val_total += labels.size(0)
+
+    val_acc = val_correct / val_total
+    val_loss /= val_total
+
+    train_acc_history.append(train_acc)
+    train_loss_history.append(train_loss)
+    val_acc_history.append(val_acc)
+    val_loss_history.append(val_loss)
+
+    print(f"Epoch {epoch+1}/{EPOCHS} — Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
+
+    scheduler.step(val_loss)
+
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        early_stop_counter = 0
+        torch.save(model.state_dict(), 'best_model.pth')
+    else:
+        early_stop_counter += 1
+        if early_stop_counter >= early_stop_patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
+# Plot
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.plot(train_acc_history, label='Train Acc')
+plt.plot(val_acc_history, label='Val Acc')
+plt.title('Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(train_loss_history, label='Train Loss')
+plt.plot(val_loss_history, label='Val Loss')
+plt.title('Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.show()
+
 
 
 
