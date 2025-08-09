@@ -298,6 +298,165 @@ clean_img = cv2.imread(clean_img_path)
 
 plot_side_by_side(raw_img, clean_img, class_name)
 
+#3.	Deep Learning Model 
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets, transforms
+import matplotlib.pyplot as plt
+
+# Set device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Hyperparameters
+IMG_SIZE = 224
+BATCH_SIZE = 32
+EPOCHS = 15
+LEARNING_RATE = 0.001
+NUM_CLASSES = 10  # change based on your dataset classes count
+
+# Data transforms (normalize and resize)
+transform = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet mean/std, can adjust
+                         std=[0.229, 0.224, 0.225]),
+])
+
+# Load dataset from cleaned folder
+dataset_path = '/content/cleaned_dataset/EuroSAT_RGB'
+dataset = datasets.ImageFolder(root=dataset_path, transform=transform)
+
+# Train-validation split (80/20)
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_set, val_set = random_split(dataset, [train_size, val_size])
+
+train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False)
+
+# Define CNN model
+class CustomCNN(nn.Module):
+    def __init__(self, num_classes=NUM_CLASSES):
+        super(CustomCNN, self).__init__()
+
+        self.features = nn.Sequential(
+            # Conv Layer 1
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            # Conv Layer 2
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            # Conv Layer 3
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Flatten(),
+            nn.Linear(128 * (IMG_SIZE // 8) * (IMG_SIZE // 8), 256),  # downsampled by 2x2x2 pooling
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)  # final output layer without softmax
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+# Instantiate model, loss and optimizer
+model = CustomCNN(num_classes=NUM_CLASSES).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+# Training and validation loop
+train_acc_history = []
+val_acc_history = []
+train_loss_history = []
+val_loss_history = []
+
+for epoch in range(EPOCHS):
+    # Training
+    model.train()
+    train_correct = 0
+    train_total = 0
+    train_loss = 0
+
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        train_loss += loss.item() * images.size(0)
+        _, predicted = torch.max(outputs, 1)
+        train_correct += (predicted == labels).sum().item()
+        train_total += labels.size(0)
+
+    train_acc = train_correct / train_total
+    train_loss = train_loss / train_total
+    train_acc_history.append(train_acc)
+    train_loss_history.append(train_loss)
+
+    # Validation
+    model.eval()
+    val_correct = 0
+    val_total = 0
+    val_loss = 0
+
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            val_loss += loss.item() * images.size(0)
+            _, predicted = torch.max(outputs, 1)
+            val_correct += (predicted == labels).sum().item()
+            val_total += labels.size(0)
+
+    val_acc = val_correct / val_total
+    val_loss = val_loss / val_total
+    val_acc_history.append(val_acc)
+    val_loss_history.append(val_loss)
+
+    print(f"Epoch {epoch+1}/{EPOCHS} — Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
+
+# Plot accuracy and loss
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+plt.plot(train_acc_history, label='Train Accuracy')
+plt.plot(val_acc_history, label='Validation Accuracy')
+plt.title('Accuracy over epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(train_loss_history, label='Train Loss')
+plt.plot(val_loss_history, label='Validation Loss')
+plt.title('Loss over epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.show()
+
+
 
 
 
